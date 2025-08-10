@@ -1,0 +1,14 @@
+service : (record { name: text; symbol: text; initial_supply: nat }) -> {
+  token_metadata: () -> (record { name: text; symbol: text }) query;
+  total_supply: () -> (nat) query;
+  balance_of: (principal) -> (nat) query;
+  my_balance: () -> (nat) query;
+  get_admin: () -> (principal) query;
+  whoami: () -> (principal) query;
+  holders: () -> (vec record { owner: principal; balance: nat }) query;
+  transfer: (principal, nat) -> (variant { Ok: null; Err: text });
+  mint: (principal, nat) -> (variant { Ok: null; Err: text });
+  set_admin: (principal) -> (variant { Ok: null; Err: text });
+}
+
+

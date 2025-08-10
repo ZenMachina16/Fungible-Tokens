@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "canisters": {
+    "token": {
+      "type": "rust",
+      "package": "token",
+      "candid": "src/token/token.did"
+    },
+    "frontend": {
+      "type": "assets",
+      "source": [
+        "frontend/dist"
+      ],
+      "build": "npm install --prefix frontend && npm run build --prefix frontend",
+      "dependencies": ["token"]
+    }
+  },
+  "networks": {
+    "local": {
+      "bind": "127.0.0.1:4943",
+      "type": "ephemeral"
+    }
+  }
+}
+
+
