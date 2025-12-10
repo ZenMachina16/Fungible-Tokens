@@ -1,0 +1,190 @@
+name: CI/CD Pipeline for Fungible-Tokens
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      rollback_target:
+        description: 'Target GitHub Actions run ID for rollback (e.g., 123456789)'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  deployments: write # Necessary if using GitHub's deployment API, otherwise contents: read is sufficient
+
+jobs:
+  build-and-test:
+    name: Build and Test Node.js ${{ matrix.node-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: [18.x, 20.x]
+
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+
+    - name: Setup Node.js ${{ matrix.node-version }}
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ matrix.node-version }}
+
+    - name: Cache Node Modules
+      uses: actions/cache@v4
+      with:
+        path: ~/.npm
+        key: ${{ runner.os }}-node-${{ hashFiles('**/package-lock.json') }}
+        restore-keys: |
+          ${{ runner.os }}-node-
+      continue-on-error: true # Cache failures should not fail the job
+
+    - name: Install Dependencies (with retry)
+      run: |
+        MAX_RETRIES=3
+        RETRY_COUNT=0
+        SUCCESS=false
+        echo "Checking for package-lock.json to determine installation method..."
+        while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
+          echo "Attempt $((RETRY_COUNT + 1)) to install dependencies..."
+          if [ -f package-lock.json ]; then
+            npm ci --silent
+          else
+            npm install --silent
+          fi
+          if [ $? -eq 0 ]; then
+            SUCCESS=true
+            echo "Dependencies installed successfully."
+            break
+          else
+            echo "Dependency installation failed. Retrying in 5 seconds..."
+            RETRY_COUNT=$((RETRY_COUNT + 1))
+            sleep 5
+          fi
+        done
+        if [ "$SUCCESS" == "false" ]; then
+          echo "Failed to install dependencies after $MAX_RETRIES attempts. Exiting."
+          exit 1
+        fi
+
+    - name: Run Tests if script exists
+      id: check_test_script
+      run: |
+        if jq -e '.scripts.test' package.json > /dev/null; then
+          echo "Test script 'test' found in package.json, running npm test..."
+          npm test
+          echo "Tests completed."
+        else
+          echo "No 'test' script found in package.json, skipping tests."
+        fi
+
+    - name: Run Build if script exists
+      id: check_build_script
+      run: |
+        if jq -e '.scripts.build' package.json > /dev/null; then
+          echo "Build script 'build' found in package.json, running npm run build..."
+          npm run build
+          echo "build_ran=true" >> "$GITHUB_OUTPUT"
+          echo "Build completed."
+        else
+          echo "No 'build' script found in package.json, skipping build."
+          echo "build_ran=false" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Run npm audit
+      run: |
+        echo "Running npm audit for high severity vulnerabilities..."
+        npm audit --audit-level=high || true # Continue on error if vulnerabilities are found
+        echo "npm audit scan completed."
+
+    - name: Run Snyk scan (optional)
+      if: secrets.SNYK_TOKEN != ''
+      continue-on-error: true # Snyk scan failures should not fail the job
+      run: |
+        echo "SNYK_TOKEN secret found, running Snyk scan..."
+        npm install -g snyk@1.1200.0 # Pin Snyk version for stability
+        snyk test --severity-threshold=high --json > snyk_results.json || true
+        echo "Snyk scan completed."
+        if [ -f snyk_results.json ]; then
+          echo "Snyk results saved to snyk_results.json."
+        fi
+
+    - name: Upload build artifact
+      if: steps.check_build_script.outputs.build_ran == 'true'
+      uses: actions/upload-artifact@v4
+      with:
+        name: build-artifact
+        path: |
+          dist/
+          build/
+        retention-days: 7
+      # If 'path' doesn't exist, upload-artifact will log a warning and succeed, meeting "skip safely".
+
+  deploy:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: build-and-test
+    if: |
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/main' &&
+      needs.build-and-test.result == 'success'
+
+    steps:
+    - name: Download build artifact
+      id: download_build_artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: build-artifact
+        path: ./build-artifact-download
+      continue-on-error: true # Allows job to continue even if artifact download fails
+
+    - name: Simulate Deployment
+      run: |
+        if [ -d "build-artifact-download" ] && [ "$(ls -A build-artifact-download)" ]; then
+          echo "Build artifact downloaded successfully. Initiating deployment to production..."
+          ls -R build-artifact-download/ || true # List content if available
+          # --- YOUR ACTUAL DEPLOYMENT COMMANDS GO HERE ---
+          echo "Simulated deployment of artifact 'build-artifact' from branch 'main' has completed successfully."
+        else
+          echo "No build artifact available or artifact download failed during download step. Skipping deployment."
+        fi
+
+  rollback:
+    name: Rollback Deployment
+    runs-on: ubuntu-latest
+    if: |
+      github.event_name == 'workflow_dispatch' &&
+      github.event.inputs.rollback_target != ''
+
+    steps:
+    - name: Log Rollback Target
+      run: |
+        echo "Rollback initiated via workflow_dispatch event."
+        echo "Target GitHub Actions run ID for rollback: ${{ github.event.inputs.rollback_target }}"
+
+    - name: Attempt to Download Rollback Artifact
+      id: download_rollback_artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: build-artifact
+        run-id: ${{ github.event.inputs.rollback_target }} # Assuming rollback_target is a valid run-id
+        path: ./rollback-artifact-download
+      continue-on-error: true # Critical: If run-id is invalid or artifact not found, this step should not fail the job
+
+    - name: Simulate Rollback
+      run: |
+        if [ -d "rollback-artifact-download" ] && [ "$(ls -A rollback-artifact-download)" ]; then
+          echo "Rollback artifact (run ID: ${{ github.event.inputs.rollback_target }}) downloaded successfully."
+          echo "Simulating rollback to this version using the downloaded artifact..."
+          ls -R rollback-artifact-download/ || true # List content if available
+          # --- YOUR ACTUAL ROLLBACK COMMANDS GO HERE ---
+          echo "Simulated rollback using artifact 'build-artifact' from run ID ${{ github.event.inputs.rollback_target }} has completed."
+        else
+          echo "No build artifact found for run ID: ${{ github.event.inputs.rollback_target }} or download failed."
+          echo "Skipping actual rollback operation as no artifact was available to roll back to."
+        fi
